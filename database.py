@@ -1,6 +1,8 @@
 """
 מודול ניהול בסיס הנתונים (SQLite).
 מאתחל את הטבלאות ומספק חיבור בטוח לבסיס הנתונים.
+
+v2: הוספת עמודת id_number לטבלת members לצורך אימות זהות בצ'אטבוט.
 """
 
 import sqlite3
@@ -16,6 +18,7 @@ CREATE TABLE IF NOT EXISTS members (
     name TEXT NOT NULL,
     phone TEXT NOT NULL UNIQUE,
     email TEXT,
+    id_number TEXT UNIQUE,
     is_active BOOLEAN DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -68,7 +71,28 @@ def init_db():
     with get_connection() as conn:
         conn.executescript(SCHEMA_SQL)
         conn.commit()
+    migrate_db()
     print("בסיס הנתונים ואתחול הטבלאות הושלמו בהצלחה.")
+
+
+def migrate_db():
+    """
+    Migration בטוח: מוסיף עמודות חדשות לטבלאות קיימות מבלי לפגוע בנתונים.
+    מריץ ALTER TABLE רק אם העמודה עדיין לא קיימת.
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        # בדיקה אם עמודת id_number קיימת בטבלת members
+        cursor.execute("PRAGMA table_info(members)")
+        columns = [row["name"] for row in cursor.fetchall()]
+        if "id_number" not in columns:
+            # SQLite לא תומך ב-ADD COLUMN UNIQUE ישירות — מוסיפים עמודה ואז index
+            conn.execute("ALTER TABLE members ADD COLUMN id_number TEXT")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_members_id_number ON members(id_number)"
+            )
+            conn.commit()
+            print("Migration: עמודת 'id_number' + unique index נוספו לטבלת members.")
 
 if __name__ == "__main__":
     init_db()
