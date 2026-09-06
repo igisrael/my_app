@@ -1,75 +1,137 @@
 """
-chatbot/state.py — ניהול מצב שיחה (State Machine) לצ'אטבוט FitStudio.
+=============================================================
+chatbot/state.py — State Machine לניהול מצב שיחה
+=============================================================
 
-מחזיק את כל מה שהצ'אטבוט צריך לזכור בין הודעה להודעה:
-- מי הלקוח המועמד
-- באיזה שלב השיחה נמצאת
-- כמה ניסיונות אימות בוצעו
+מטרה:
+    מחלקה זו מייצגת את "הזיכרון" של הצ'אטבוט בין הודעה להודעה.
+    ב-Streamlit, היא נשמרת ב-st.session_state.
+    ב-Flask, היא נשמרת ב-flask.session (או בזיכרון).
 
-Stages (שלבי שיחה):
-  GREETING    - ברכה / תחילת שיחה
-  IDENTIFY    - מחפש לקוח לפי שם
-  CLARIFY     - מבקש הבהרה (כמה תוצאות עם אותו שם)
-  VERIFY      - מבקש תעודת זהות
-  ANSWERED    - אומת בהצלחה, ניתן לחשוף פרטים
-  BLOCKED     - חצה מגבלת ניסיונות, שיחה נחסמת
-  RAG_MODE    - שאלה כללית (לא על תור ספציפי)
+    בלי state management, הבוט היה שוכח את שם המשתמש,
+    את שלב האימות, ואת מספר הניסיונות הכושלים.
+
+שלבי שיחה (Stages):
+    GREETING      → ברכה ראשונית, בקשת שם מלא
+    IDENTIFY_NAME → המתנה לשם מלא מהמשתמש
+    IDENTIFY_ID   → המתנה לתעודת זהות לאימות (לאחר קבלת שם)
+    ANSWERED      → אימות הצליח (שם+ת.ז תואמים), חשיפת פרטי מנוי
+    BLOCKED       → חצה מגבלת 3 ניסיונות אימות
+    RAG_MODE      → שאלה כללית (שעות, מחירים) — לא שאילתת תור
+
+מגבלת אבטחה:
+    MAX_AUTH_ATTEMPTS = 3 (לפי האיפיון)
+    לאחר 3 כשלונות → stage = BLOCKED → אסור לחשוף מידע
 """
 
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
 
-MAX_AUTH_ATTEMPTS = 3  # מגבלת ניסיונות אימות לפי האיפיון
+# ===========================================================
+# קבוע: מספר ניסיונות אימות מקסימלי (לפי האיפיון)
+# ===========================================================
+MAX_AUTH_ATTEMPTS = 3
 
 
 @dataclass
 class ConversationState:
-    """מייצג את מצב השיחה הנוכחית."""
+    """
+    מייצג את מצב השיחה המלא בין הבוט למשתמש.
 
-    # שלב נוכחי
+    משמש כ-"זיכרון" בין הודעות:
+    - מי הלקוח המועמד (לפני אימות)
+    - מה שלב השיחה הנוכחי
+    - כמה ניסיונות אימות נוצלו
+    - מה המשתמש טען (תאריך/שעה)
+    - היסטוריית ההודעות להצגה
+
+    שימוש:
+        state = ConversationState()
+        state.stage = "VERIFY"
+        state.add_message("user", "123456789")
+    """
+
+    # ---- שלב השיחה הנוכחי ----
     stage: str = "GREETING"
 
-    # מידע על הלקוח המועמד (לפני אימות)
-    candidate_member_id: Optional[int] = None
-    candidate_member_name: Optional[str] = None
+    # ---- מידע על הלקוח שזוהה (לפני אימות מלא) ----
+    candidate_member_id: Optional[int] = None      # ID בטבלת members
+    candidate_member_name: Optional[str] = None    # שם מלא לתצוגה
 
-    # תביעות המשתמש (מה הוא אמר)
-    claimed_date: Optional[str] = None
-    claimed_time: Optional[str] = None
+    # ---- תביעות המשתמש (מה הוא אמר שיש לו) ----
+    claimed_date: Optional[str] = None   # תאריך שהמשתמש טען (YYYY-MM-DD)
+    claimed_time: Optional[str] = None   # שעה שהמשתמש טען (HH:MM)
 
-    # אימות
-    verified: bool = False
-    auth_attempts: int = 0
+    # ---- פעולות ממתינות (למשל הרשמה לאימון לפני אימות) ----
+    pending_intent: Optional[str] = None
+    pending_date: Optional[str] = None
+    pending_time: Optional[str] = None
 
-    # רשימת מועמדים אם יש כמה תוצאות לשם
-    multiple_candidates: List[Dict] = field(default_factory=list)
+    # ---- אימות זהות ----
+    verified: bool = False       # True = אומת בהצלחה, מותר לחשוף פרטים
+    auth_attempts: int = 0       # מונה ניסיונות אימות
 
-    # היסטוריית שיחה (לDisplay)
+    # ---- היסטוריית שיחה לתצוגה (רשימת {"role": ..., "content": ...}) ----
     history: List[Dict] = field(default_factory=list)
 
-    def reset(self):
-        """איפוס מוחלט של השיחה — מתחיל מחדש."""
+    # ------------------------------------------------------------------
+    # Methods
+    # ------------------------------------------------------------------
+
+    def reset(self) -> None:
+        """
+        מאפס את כל מצב השיחה — מחזיר ל-GREETING.
+
+        נקרא כאשר המשתמש כותב "התחל מחדש" או לוחץ כפתור reset.
+        לא מנקה את history (הצגה היסטורית נשמרת).
+        """
         self.stage = "GREETING"
         self.candidate_member_id = None
         self.candidate_member_name = None
         self.claimed_date = None
         self.claimed_time = None
+        self.pending_intent = None
+        self.pending_date = None
+        self.pending_time = None
         self.verified = False
         self.auth_attempts = 0
-        self.multiple_candidates = []
 
-    def add_message(self, role: str, content: str):
-        """הוספת הודעה להיסטוריה. role: 'user' | 'bot'"""
+    def add_message(self, role: str, content: str) -> None:
+        """
+        מוסיף הודעה להיסטוריית השיחה.
+
+        Args:
+            role    : "user" (המשתמש) או "bot" (הבוט)
+            content : תוכן ההודעה
+        """
         self.history.append({"role": role, "content": content})
 
     @property
     def is_blocked(self) -> bool:
+        """
+        Property: בודק אם השיחה חסומה.
+
+        Returns:
+            True אם המשתמש חצה את מגבלת ניסיונות האימות
+        """
         return self.stage == "BLOCKED"
 
     @property
     def is_verified(self) -> bool:
+        """
+        Property: בודק אם המשתמש אומת בהצלחה.
+
+        Returns:
+            True רק אם גם verified=True וגם stage="ANSWERED"
+        """
         return self.verified and self.stage == "ANSWERED"
 
     @property
     def attempts_left(self) -> int:
+        """
+        Property: כמה ניסיונות אימות נותרו.
+
+        Returns:
+            מספר שלם בין 0 ל-MAX_AUTH_ATTEMPTS
+        """
         return MAX_AUTH_ATTEMPTS - self.auth_attempts

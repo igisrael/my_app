@@ -2,14 +2,7 @@
 rag/knowledge_base.py — מאגר הידע של FitStudio ל-RAG.
 
 מכיל 25 זוגות שאלה-תשובה על הסטודיו (שעות, מחירים, חוקים וכו').
-פונקציית seed_chromadb() מזרימה אותם ל-ChromaDB לחיפוש similarity.
-
-ChromaDB נשמר locally בתיקיית ./chroma_db
 """
-
-import os
-import chromadb
-from chromadb.config import Settings
 
 # ===========================================================
 # 25 זוגות שאלה-תשובה (מאגר הידע)
@@ -142,57 +135,3 @@ KNOWLEDGE_BASE = [
     },
 ]
 
-
-def get_chroma_client():
-    """מחזיר ChromaDB client עם persistent storage."""
-    persist_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_db")
-    os.makedirs(persist_dir, exist_ok=True)
-    return chromadb.PersistentClient(path=persist_dir)
-
-
-def get_or_create_collection():
-    """מחזיר את ה-collection של הידע. יוצר אם לא קיים."""
-    client = get_chroma_client()
-    return client.get_or_create_collection(
-        name="fitstudio_knowledge",
-        metadata={"hnsw:space": "cosine"},  # similarity metric
-    )
-
-
-def seed_chromadb():
-    """
-    מזרים את 25 השאלות-תשובות ל-ChromaDB.
-    בטוח להרצה מרובה — בודק אם כבר קיים לפני הכנסה.
-    """
-    collection = get_or_create_collection()
-
-    # בדיקה אם כבר זרוע
-    existing = collection.get(ids=[kb["id"] for kb in KNOWLEDGE_BASE])
-    existing_ids = set(existing["ids"])
-
-    new_docs = [kb for kb in KNOWLEDGE_BASE if kb["id"] not in existing_ids]
-
-    if not new_docs:
-        print(f"ChromaDB: כבר מכיל {len(KNOWLEDGE_BASE)} מסמכים. דילוג על זריעה.")
-        return
-
-    collection.add(
-        ids=[kb["id"] for kb in new_docs],
-        documents=[
-            # שדה הטקסט לחיפוש = שאלה + תשובה ביחד
-            f"שאלה: {kb['question']}\nתשובה: {kb['answer']}"
-            for kb in new_docs
-        ],
-        metadatas=[
-            {"question": kb["question"], "answer": kb["answer"]}
-            for kb in new_docs
-        ],
-    )
-
-    print(f"ChromaDB: נוספו {len(new_docs)} מסמכים חדשים לאוסף.")
-
-
-if __name__ == "__main__":
-    seed_chromadb()
-    collection = get_or_create_collection()
-    print(f"סה\"כ מסמכים ב-ChromaDB: {collection.count()}")

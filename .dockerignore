@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.git/
+.gitignore
+*.db
+sim_output.txt
+fitstudio.zip
+.streamlit/

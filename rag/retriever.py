@@ -1,105 +1,141 @@
 """
-rag/retriever.py — מנוע חיפוש RAG ב-ChromaDB עם Fallback מדורג.
+rag/retriever.py — מנוע חיפוש RAG קל משקל באמצעות Google GenAI (ללא ChromaDB).
 
-3 רמות Fallback:
-1. System Prompt Strictness  — ChromaDB מחזיר רק תוצאות רלוונטיות
-2. Distance Threshold        — סינון לפי מרחק cosine (< SIMILARITY_THRESHOLD)
-3. Graceful Fallback         — אם לא נמצא, מחזיר None (הבוט מטפל)
+מכיוון ששרת PythonAnywhere החינמי מוגבל מאוד במקום האחסון (512MB),
+הורדנו את ChromaDB ואנו מבצעים חיפוש סמנטי ישיר בעזרת מודל ה-Embeddings של Gemini.
 """
 
+import os
+import math
 from typing import Optional
-from rag.knowledge_base import get_or_create_collection, seed_chromadb
+from dotenv import load_dotenv
+from google import genai
+from rag.knowledge_base import KNOWLEDGE_BASE
 
-# סף דמיון: מתחת לו — תוצאה לא נחשבת רלוונטית
-# cosine distance: 0 = זהה, 2 = הפוכים לגמרי. 0.5 = ערך מאוזן לעברית
-SIMILARITY_THRESHOLD = 0.6
+load_dotenv()
+# אתחול הלקוח של Gemini
+_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# מספר תוצאות מקסימלי להחזיר מ-ChromaDB
-N_RESULTS = 3
+# מטמון לשמירת ההטבעות (Embeddings) בזיכרון, למניעת קריאות חוזרות
+_kb_embeddings = []
 
-_initialized = False
+# סף דמיון מינימלי (Cosine Similarity). 1.0 = זהה לחלוטין.
+SIMILARITY_THRESHOLD = 0.55
 
+def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+    """מחשב קרבה (Similarity) בין שני וקטורים"""
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    norm_a = math.sqrt(sum(a * a for a in vec1))
+    norm_b = math.sqrt(sum(b * b for b in vec2))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot_product / (norm_a * norm_b)
+
+
+def _get_embedding(text: str) -> list[float]:
+    """מייצר וקטור יחיד עבור טקסט"""
+    response = _client.models.embed_content(
+        model='gemini-embedding-2',
+        contents=text,
+    )
+    return response.embeddings[0].values
+
+
+CACHE_FILE = os.path.join(os.path.dirname(__file__), "embeddings_cache.json")
 
 def _ensure_initialized():
-    """מוודא שה-ChromaDB אוכלס לפחות פעם אחת."""
-    global _initialized
-    if not _initialized:
-        seed_chromadb()
-        _initialized = True
+    """מטעין את מאגר הידע ומייצר וקטורים. משתמש בקובץ מטמון מקומי כדי לחסוך קריאות API מיותרות."""
+    global _kb_embeddings
+    if _kb_embeddings:
+        return
+        
+    # ניסיון לטעון מהמטמון המקומי
+    if os.path.exists(CACHE_FILE):
+        try:
+            import json
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                _kb_embeddings = json.load(f)
+            print(f"RAG: Successfully loaded {len(_kb_embeddings)} embeddings from local cache.")
+            return
+        except Exception as e:
+            print(f"RAG Error reading cache: {e}")
+            _kb_embeddings = []
+
+    # אם הגענו לכאן - אין מטמון או שהוא שגוי, נייצר וקטורים מול Gemini
+    texts = [f"שאלה: {kb['question']}\nתשובה: {kb['answer']}" for kb in KNOWLEDGE_BASE]
+    try:
+        import json
+        for i, text in enumerate(texts):
+            response = _client.models.embed_content(
+                model='gemini-embedding-2',
+                contents=text,
+            )
+            _kb_embeddings.append({
+                "id": KNOWLEDGE_BASE[i]["id"],
+                "question": KNOWLEDGE_BASE[i]["question"],
+                "answer": KNOWLEDGE_BASE[i]["answer"],
+                "vector": response.embeddings[0].values
+            })
+        
+        # שמירת הווקטורים לקובץ מטמון
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(_kb_embeddings, f, ensure_ascii=False, indent=2)
+            
+        print(f"RAG: Successfully generated {len(_kb_embeddings)} embeddings and saved to cache.")
+    except Exception as e:
+        print(f"RAG Error initializing embeddings: {e}")
 
 
 def get_relevant_answer(query: str) -> Optional[str]:
     """
-    מחפש תשובה רלוונטית ל-query ב-ChromaDB.
-
-    מחזיר:
-    - str עם התשובה הרלוונטית ביותר אם נמצאה (distance < SIMILARITY_THRESHOLD)
-    - None אם לא נמצאה תשובה מספיק רלוונטית (Graceful Fallback)
+    מחפש תשובה רלוונטית ל-query במאגר הידע הווירטואלי.
+    מחזיר תשובה אם הדמיון גבוה מהסף.
     """
     _ensure_initialized()
-
-    try:
-        collection = get_or_create_collection()
-
-        if collection.count() == 0:
-            return None
-
-        results = collection.query(
-            query_texts=[query],
-            n_results=min(N_RESULTS, collection.count()),
-            include=["documents", "metadatas", "distances"],
-        )
-
-        distances = results.get("distances", [[]])[0]
-        metadatas = results.get("metadatas", [[]])[0]
-
-        if not distances:
-            return None
-
-        best_distance = distances[0]
-        best_metadata = metadatas[0] if metadatas else {}
-
-        # ---- רמה 2: Distance Threshold ----
-        if best_distance > SIMILARITY_THRESHOLD:
-            # התוצאה לא מספיק רלוונטית → Fallback
-            return None
-
-        # ---- תוצאה רלוונטית ----
-        return best_metadata.get("answer", "")
-
-    except Exception as e:
-        # כשל טכני — לא נחשוף שגיאה למשתמש
+    if not _kb_embeddings:
         return None
+        
+    try:
+        query_vec = _get_embedding(query)
+    except Exception:
+        return None
+        
+    best_score = -1.0
+    best_answer = None
+    
+    for kb in _kb_embeddings:
+        score = _cosine_similarity(query_vec, kb["vector"])
+        if score > best_score:
+            best_score = score
+            best_answer = kb["answer"]
+            
+    if best_score >= SIMILARITY_THRESHOLD:
+        return best_answer
+    
+    return None
 
 
 def search_debug(query: str) -> list:
-    """
-    גרסת Debug לחיפוש — מחזיר את כל התוצאות עם המרחקים.
-    שימושי לבדיקות ואבחון.
-    """
+    """פונקציית עזר לבדיקת רמת הדמיון של התוצאות (לצרכי Debug)"""
     _ensure_initialized()
-    collection = get_or_create_collection()
-
-    if collection.count() == 0:
+    if not _kb_embeddings:
         return []
-
-    results = collection.query(
-        query_texts=[query],
-        n_results=min(5, collection.count()),
-        include=["documents", "metadatas", "distances"],
-    )
-
-    output = []
-    for dist, meta in zip(
-        results.get("distances", [[]])[0],
-        results.get("metadatas", [[]])[0],
-    ):
-        output.append(
-            {
-                "question": meta.get("question", ""),
-                "answer": meta.get("answer", ""),
-                "distance": round(dist, 4),
-                "relevant": dist < SIMILARITY_THRESHOLD,
-            }
-        )
-    return output
+        
+    try:
+        query_vec = _get_embedding(query)
+    except Exception:
+        return []
+        
+    results = []
+    for kb in _kb_embeddings:
+        score = _cosine_similarity(query_vec, kb["vector"])
+        results.append({
+            "question": kb["question"],
+            "answer": kb["answer"],
+            "similarity": round(score, 4),
+            "relevant": score >= SIMILARITY_THRESHOLD,
+        })
+        
+    # מיון מהכי דומה להכי פחות דומה
+    results.sort(key=lambda x: x["similarity"], reverse=True)
+    return results[:5]

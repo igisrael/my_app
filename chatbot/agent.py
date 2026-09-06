@@ -1,340 +1,340 @@
 """
-chatbot/agent.py — הלוגיקה המרכזית של הצ'אטבוט FitStudio.
+=============================================================
+chatbot/agent.py — הלוגיקה המרכזית של הצ'אטבוט
+=============================================================
 
-State Machine עם 7 שלבים:
-  GREETING  → IDENTIFY → CLARIFY → VERIFY → ANSWERED
-                                          ↓
-                                        BLOCKED (אחרי 3 כשלונות)
-  כל שלב יכול → RAG_MODE (שאלות כלליות)
+מטרה:
+    מנהל את מחזור חיי השיחה כולו: מקבל הודעת משתמש,
+    מנתב לשלב המתאים, מבצע אימות זהות, שולף נתונים אמיתיים,
+    ומחזיר תשובה בעברית.
 
-כלל אבטחה קשיח: לפני ANSWERED אסור לחשוף שום פרט אישי.
+ארכיטקטורה (State Machine):
+    כל הודעת משתמש עוברת דרך process_message() →
+    מנותבת לפי state.stage → מחזירה תשובה טקסטואלית.
+
+    GREETING → IDENTIFY_NAME → IDENTIFY_ID → ANSWERED (אם אומת)
+                                           → GREETING (הצעת הרשמה אם לא אומת)
+                                           → BLOCKED (אחרי 3 כשלונות בת.ז)
+
+    כל שלב יכול לעבור ל-RAG_MODE לשאלות כלליות.
+
+שינוי ל-PythonAnywhere:
+    במקום HTTP requests ל-localhost:8000 (FastAPI),
+    משתמשים ב-db_service.py שפונה ישירות ל-SQLite.
+    זה מאפשר הפעלה כתהליך יחיד ב-PythonAnywhere.
 """
 
-import httpx
+import re
 from chatbot.state import ConversationState, MAX_AUTH_ATTEMPTS
 from chatbot.nlu import extract_intent, generate_response
-
-API_BASE = "http://localhost:8000"
-
-# ===================================================================
-# Helper: קריאות ל-REST API הפנימי
-# ===================================================================
-
-def _search_members(name: str) -> dict:
-    """חיפוש מנוי לפי שם חלקי."""
-    try:
-        r = httpx.get(f"{API_BASE}/members/search", params={"name": name}, timeout=5)
-        return r.json()
-    except Exception:
-        return {"count": 0, "results": []}
+from chatbot import db_service
+from services.wod_service import register_member_to_wod
 
 
-def _get_appointments(member_id: int) -> dict:
-    """שליפת תורים של מנוי."""
-    try:
-        r = httpx.get(
-            f"{API_BASE}/members/{member_id}/appointments",
-            params={"status": "REGISTERED"},
-            timeout=5,
-        )
-        return r.json()
-    except Exception:
-        return {"count": 0, "appointments": []}
-
-
-def _verify_identity(member_id: int, id_number: str) -> dict:
-    """אימות תעודת זהות מול ה-API."""
-    try:
-        r = httpx.post(
-            f"{API_BASE}/members/{member_id}/verify-identity",
-            json={"id_number": id_number},
-            timeout=5,
-        )
-        return r.json()
-    except Exception:
-        return {"verified": False, "message": "שגיאת תקשורת עם השרת."}
-
-
-# ===================================================================
-# Helper: הודעות קבועות (Static Responses)
-# ===================================================================
+# ===========================================================
+# הודעות קבועות (Hardcoded messages)
+# ===========================================================
+# הודעות אלו אינן עוברות דרך Gemini — הן תמיד זהות ומאובטחות
 
 MSG_GREETING = (
     "שלום! אני הבוט של FitStudio 🏋️\n"
-    "אני יכול לעזור לך לבדוק פרטי תור, שעות הסטודיו ועוד.\n"
-    "ספר לי — מה שמך ומה תרצה לדעת?"
+    "כדי שאוכל לעזור לך באופן אישי, אנא כתוב לי את שמך המלא."
 )
 
-MSG_ASK_NAME = "מה שמך? (יש להזין שם פרטי לפחות)"
+MSG_ASK_NAME = "מה שמך המלא?"
 
-MSG_NOT_FOUND = lambda name: (
-    f"לא מצאתי מנוי בשם \"{name}\" במערכת.\n"
-    "ייתכן שהשם אינו תואם בדיוק. נסה שם אחר, או פנה אלינו ישירות."
-)
+def MSG_ASK_ID(name: str, attempts_left: int) -> str:
+    """
+    בקשה להזנת תעודת זהות לאימות.
+    מציין כמה ניסיונות נותרו.
+    """
+    return (
+        f"נעים מאוד {name}! 🔐\n"
+        f"לאימות זהות ולמציאת המנוי שלך, אנא הזן את מספר תעודת הזהות שלך.\n"
+        f"(נותרו {attempts_left} ניסיונות)"
+    )
 
-MSG_CLARIFY = lambda candidates: (
-    "מצאתי כמה מנויים עם שם דומה. מי מביניהם אתה?\n"
-    + "\n".join(f"  {i+1}. {c['name']} ({c['phone'][-4:].rjust(10,'*')})"
-                for i, c in enumerate(candidates))
-    + "\nאנא ציין שם מלא."
-)
-
-MSG_ASK_ID = lambda name, attempts_left: (
-    f"זיהיתי אותך כ-{name}.\n"
-    f"לאימות זהות, אנא הזן את מספר תעודת הזהות שלך. "
-    f"(נותרו {attempts_left} ניסיונות)"
-)
-
-MSG_WRONG_ID = lambda attempts_left: (
-    f"תעודת הזהות שגויה. אנא נסה שנית.\n"
-    f"{'נותר ניסיון אחד בלבד!' if attempts_left == 1 else f'נותרו {attempts_left} ניסיונות.'}"
-)
+def MSG_WRONG_ID(attempts_left: int) -> str:
+    """הודעה כשתעודת הזהות שגויה או לא נרשמה — מבקש שוב."""
+    if attempts_left == 1:
+        warning = "⚠️ נותר ניסיון אחד בלבד!"
+    else:
+        warning = f"נותרו {attempts_left} ניסיונות."
+    return f"תעודת הזהות שהזנת אינה תקינה (יש להזין 7-9 ספרות). אנא נסה שנית.\n{warning}"
 
 MSG_BLOCKED = (
-    "חרגת ממגבלת ניסיונות האימות המותרת.\n"
-    "לביטחון פרטיך, השיחה נחסמת. אנא פנה אלינו ישירות.\n"
-    "📞 לחצ/י 'התחל מחדש' לשיחה חדשה."
+    "חרגת ממגבלת הניסיונות המותרת (3 ניסיונות). 🔒\n"
+    "לביטחון פרטיך, השיחה נחסמת.\n"
+    "אנא פנה אלינו ישירות לסיוע.\n"
+    "📞 טלפון: 050-0000000"
 )
 
-MSG_RESET = "השיחה אופסה. שלום! כיצד אוכל לעזור?"
+MSG_RESET = "✅ השיחה אופסה. שלום! כיצד אוכל לעזור? אנא כתוב לי את שמך המלא."
+
+MSG_FALLBACK = (
+    "לא מצאתי מידע ספציפי על שאלתך.\n"
+    "אנא פנה אלינו ישירות:\n"
+    "📞 טלפון: 050-0000000\n"
+    "🏠 כתובת: רחוב הספורט 1, תל אביב"
+)
 
 
-# ===================================================================
-# ChatbotAgent — הלוגיקה המרכזית
-# ===================================================================
+# ===========================================================
+# ChatbotAgent — מחלקה ראשית
+# ===========================================================
 
 class ChatbotAgent:
     """
-    מנהל שיחה מול המשתמש.
-    יש ליצור instance אחד לכל session משתמש ולשמור ב-st.session_state.
+    מנהל שיחה עם משתמש מקצה לקצה.
+
+    יצירת instance:
+        agent = ChatbotAgent()
+
+    שימוש בכל הודעה:
+        response = agent.process_message("קוראים לי רותם...")
+
+    שמירה בין הודעות:
+        ב-Streamlit: st.session_state["agent"] = agent
+        ב-Flask:     session["agent_state"] = pickle.dumps(agent)
+
+    Attributes:
+        state: ConversationState — מחזיק את כל מצב השיחה
     """
 
     def __init__(self):
+        """אתחול סוכן עם מצב שיחה חדש (GREETING)."""
         self.state = ConversationState()
+
+    # ------------------------------------------------------------------
+    # ← נקודת הכניסה הציבורית היחידה ←
+    # ------------------------------------------------------------------
 
     def process_message(self, user_message: str) -> str:
         """
-        מקבל הודעת משתמש ומחזיר תשובת בוט.
-        זוהי נקודת הכניסה היחידה — כל ההיגיון עובר דרך כאן.
+        מעבד הודעת משתמש ומחזיר תשובת בוט.
+
+        זהו ה-entry point היחיד שצריך לקרוא מבחוץ.
+        כל לוגיקת הניתוב מתרחשת כאן.
+
+        תהליך:
+            1. בדוק אם שיחה חסומה (BLOCKED)
+            2. חלץ intent בעזרת Gemini NLU
+            3. בדוק בקשת איפוס
+            4. נתב ל-handler המתאים לפי stage
+            5. הוסף הודעות להיסטוריה
+
+        Args:
+            user_message: טקסט חופשי בעברית מהמשתמש
+
+        Returns:
+            תשובת הבוט כטקסט (עברית)
         """
         user_message = user_message.strip()
+
+        # שמור את הודעת המשתמש בהיסטוריה
         self.state.add_message("user", user_message)
 
-        # ---- שיחה חסומה ----
+        # ---- בדיקה: שיחה חסומה לאחר 3 כישלונות ----
         if self.state.is_blocked:
-            response = MSG_BLOCKED
-            self.state.add_message("bot", response)
-            return response
+            self.state.add_message("bot", MSG_BLOCKED)
+            return MSG_BLOCKED
 
-        # ---- NLU: חילוץ intent ----
+        # ---- NLU: חילוץ intent ומידע מובנה ----
         nlu = extract_intent(user_message)
         intent = nlu.get("intent", "OTHER")
 
-        # ---- איפוס שיחה ----
-        if intent == "RESET" or "התחל מחדש" in user_message or "חדש" == user_message.lower():
+        # ---- שמירת כוונת הרשמה אם עדיין לא מאומת ----
+        if intent == "BOOK_CLASS" and not self.state.is_verified:
+            self.state.pending_intent = "BOOK_CLASS"
+            if nlu.get("claimed_date"):
+                self.state.pending_date = nlu.get("claimed_date")
+            if nlu.get("claimed_time"):
+                self.state.pending_time = nlu.get("claimed_time")
+
+        # ---- איפוס מפורש של השיחה ----
+        reset_keywords = {"התחל מחדש", "חדש", "reset", "restart", "נתחיל מחדש"}
+        if intent == "RESET" or user_message.strip().lower() in reset_keywords:
             self.state.reset()
             self.state.add_message("bot", MSG_RESET)
             return MSG_RESET
 
-        # ---- ניתוב לפי שלב ----
+        # ---- ניתוב לפי שלב השיחה ----
         response = self._route(intent, nlu, user_message)
         self.state.add_message("bot", response)
         return response
 
+    # ------------------------------------------------------------------
+    # ניתוב (Router)
+    # ------------------------------------------------------------------
+
     def _route(self, intent: str, nlu: dict, raw: str) -> str:
-        """מנתב לפי שלב השיחה הנוכחי."""
+        """
+        מנתב את ההודעה ל-handler המתאים לפי stage נוכחי.
+
+        Args:
+            intent: כוונת המשתמש (מ-NLU)
+            nlu   : dict מלא של תוצאת NLU (שם, תאריך, ת.ז. וכו')
+            raw   : הטקסט הגולמי של המשתמש
+
+        Returns:
+            תשובת הבוט
+        """
         stage = self.state.stage
 
-        # ---- שלב GREETING ----
         if stage == "GREETING":
+            # ברכה ראשונה — עובר ל-IDENTIFY מייד
+            self.state.stage = "IDENTIFY_NAME"
             if intent == "GREETING":
-                self.state.stage = "IDENTIFY"
                 return MSG_GREETING
-            # כל פנייה ראשונה — נעבור ל-IDENTIFY
-            self.state.stage = "IDENTIFY"
-            return self._handle_identify(intent, nlu, raw)
+            # אם הזין שם מייד ללא ברכה — המשך לזיהוי שם
+            return self._handle_identify_name(intent, nlu, raw)
 
-        # ---- שלב IDENTIFY ----
-        if stage == "IDENTIFY":
-            return self._handle_identify(intent, nlu, raw)
+        elif stage == "IDENTIFY_NAME" or stage == "IDENTIFY":
+            return self._handle_identify_name(intent, nlu, raw)
 
-        # ---- שלב CLARIFY ----
-        if stage == "CLARIFY":
-            return self._handle_clarify(nlu, raw)
+        elif stage == "IDENTIFY_ID":
+            return self._handle_identify_id(intent, nlu, raw)
 
-        # ---- שלב VERIFY ----
-        if stage == "VERIFY":
-            return self._handle_verify(intent, nlu, raw)
-
-        # ---- שלב ANSWERED ----
-        if stage == "ANSWERED":
+        elif stage == "ANSWERED":
             return self._handle_answered(intent, nlu, raw)
 
-        # ---- שאלות כלליות (RAG) ----
-        if stage == "RAG_MODE":
-            return self._handle_rag(raw)
-
-        return "מצטערים, אירעה שגיאה פנימית. נסה שוב."
+        return f"מצטערים, אירעה שגיאה פנימית. נסה שוב. (Stage: {stage})"
 
     # ------------------------------------------------------------------
-    # Handlers לכל שלב
+    # Handlers — handler לכל שלב שיחה
     # ------------------------------------------------------------------
 
-    def _handle_identify(self, intent: str, nlu: dict, raw: str) -> str:
-        """שלב זיהוי לקוח לפי שם."""
+    def _handle_identify_name(self, intent: str, nlu: dict, raw: str) -> str:
+        """
+        שלב IDENTIFY_NAME: קבלת שם מלא מהמשתמש.
 
-        # שאלה כללית — עבור למצב RAG
-        if intent == "GENERAL_QUESTION":
-            self.state.stage = "RAG_MODE"
+        Args:
+            intent: כוונת המשתמש
+            nlu   : מידע מחולץ (name וכו')
+            raw   : הטקסט הגולמי
+        """
+        # שאלה כללית (שעות, מחירים) או משפט כלשהו → עבור ל-RAG תחילה אם אין שם
+        if intent in ["GENERAL_QUESTION", "OTHER"] and not nlu.get("name"):
             return self._handle_rag(raw)
 
         name = nlu.get("name")
         if not name:
-            # שמור תביעות לתאריך אם הוזן
-            if nlu.get("claimed_date"):
-                self.state.claimed_date = nlu["claimed_date"]
-            if nlu.get("claimed_time"):
-                self.state.claimed_time = nlu["claimed_time"]
-            self.state.stage = "IDENTIFY"
+            # לא נמצא שם בהודעה — בקש שוב
             return MSG_ASK_NAME
 
-        # שמור תביעות
-        if nlu.get("claimed_date"):
-            self.state.claimed_date = nlu["claimed_date"]
+        # השם התקבל - שמור אותו במצב השיחה ועבור לשלב הבא (בקשת ת.ז.)
+        self.state.candidate_member_name = name
+        self.state.stage = "IDENTIFY_ID"
+        return MSG_ASK_ID(name, self.state.attempts_left)
 
-        # חיפוש ב-API
-        result = _search_members(name)
-        count = result.get("count", 0)
-        candidates = result.get("results", [])
+    def _handle_identify_id(self, intent: str, nlu: dict, raw: str) -> str:
+        """
+        שלב IDENTIFY_ID: קבלת ת.ז ואימות משולב (שם + ת.ז) במסד הנתונים.
 
-        if count == 0:
-            return generate_response("not_found", {"name": name})
-
-        if count == 1:
-            # מנוי ייחודי — עבור לאימות
-            m = candidates[0]
-            self.state.candidate_member_id = m["id"]
-            self.state.candidate_member_name = m["name"]
-            self.state.stage = "VERIFY"
-            return MSG_ASK_ID(m["name"], self.state.attempts_left)
-
-        # כמה תוצאות — צריך הבהרה
-        self.state.multiple_candidates = candidates
-        self.state.stage = "CLARIFY"
-        return MSG_CLARIFY(candidates)
-
-    def _handle_clarify(self, nlu: dict, raw: str) -> str:
-        """שלב הבהרה — בחירה מבין מספר מנויים עם שם דומה."""
-        name = nlu.get("name") or raw.strip()
-
-        # חיפוש מדויק יותר בין המועמדים
-        for c in self.state.multiple_candidates:
-            if name.strip() in c["name"] or c["name"] in name.strip():
-                self.state.candidate_member_id = c["id"]
-                self.state.candidate_member_name = c["name"]
-                self.state.multiple_candidates = []
-                self.state.stage = "VERIFY"
-                return MSG_ASK_ID(c["name"], self.state.attempts_left)
-
-        # לא זיהינו — שאל שוב
-        return (
-            "לא הצלחתי להתאים את השם שציינת. אנא ציין שם מלא (שם פרטי ומשפחה).\n"
-            + "\n".join(f"  - {c['name']}" for c in self.state.multiple_candidates)
-        )
-
-    def _handle_verify(self, intent: str, nlu: dict, raw: str) -> str:
-        """שלב אימות תעודת זהות."""
-
-        # שאלה כללית בזמן שממתינים לת.ז.
+        Args:
+            intent: כוונת המשתמש 
+            nlu   : מידע מחולץ (id_number אם זוהה)
+            raw   : הטקסט הגולמי
+        """
+        # שאלה כללית בזמן ממתינים לת.ז. → RAG
         if intent == "GENERAL_QUESTION":
-            self.state.stage = "RAG_MODE"
             return self._handle_rag(raw)
 
-        # חילוץ ת.ז. מהנ-NLU או מהטקסט הגולמי
+        # חילוץ ת.ז.: קודם מ-NLU, אחר כך regex על הטקסט הגולמי
         id_number = nlu.get("id_number")
         if not id_number:
-            # ניסיון לחלץ ת.ז. מהטקסט ישירות (7-9 ספרות)
-            import re
+            # regex: חפש רצף של 7-9 ספרות (פורמט ת.ז. ישראלית)
             match = re.search(r'\b\d{7,9}\b', raw)
             if match:
                 id_number = match.group()
 
         if not id_number:
-            return (
-                f"אנא הזן את מספר תעודת הזהות שלך (7-9 ספרות).\n"
-                f"נותרו {self.state.attempts_left} ניסיונות."
-            )
+            # לא הוזנה ת.ז. תקינה
+            return MSG_WRONG_ID(self.state.attempts_left)
 
-        # אימות מול ה-API
-        self.state.auth_attempts += 1
-        result = _verify_identity(self.state.candidate_member_id, id_number)
+        # ---- אימות מול בסיס הנתונים ----
+        self.state.auth_attempts += 1  # הגדל מונה לפני הבדיקה
+        name = self.state.candidate_member_name
+        
+        result = db_service.authenticate_member(name, id_number)
 
         if result.get("verified"):
+            # ✅ אימות הצליח!
             self.state.verified = True
+            self.state.candidate_member_id = result["member"]["id"]
             self.state.stage = "ANSWERED"
             return self._deliver_answer()
 
-        # אימות נכשל
+        # ❌ אימות נכשל (מנוי לא נמצא או שם ות.ז לא תואמים)
         if self.state.auth_attempts >= MAX_AUTH_ATTEMPTS:
+            # תרחיש חסימה: חצה גבול
             self.state.stage = "BLOCKED"
             return MSG_BLOCKED
 
-        return MSG_WRONG_ID(self.state.attempts_left)
+        # הלקוח לא נמצא או השם/ת.ז שגויים, מציעים הרשמה ומאפסים
+        # שומרים את השם וה-ID לפני האיפוס כדי להעביר ל-Prompt
+        offer_msg = generate_response("offer_registration", {"name": name, "id_number": id_number})
+        self.state.reset()
+        return offer_msg
 
     def _handle_answered(self, intent: str, nlu: dict, raw: str) -> str:
-        """שלב לאחר אימות — ניתן לחשוף פרטים. ממשיך לענות על שאלות."""
+        """
+        שלב ANSWERED: המשתמש אומת בהצלחה.
+
+        Args:
+            intent: כוונת המשתמש בשאלה הנוכחית
+            nlu   : מידע מחולץ
+            raw   : הטקסט הגולמי
+        """
+        # שאלה כללית → RAG
         if intent == "GENERAL_QUESTION":
             return self._handle_rag(raw)
-        # עדכון תביעות אם המשתמש שואל שאלה חדשה על תור
-        if nlu.get("claimed_date"):
-            self.state.claimed_date = nlu["claimed_date"]
-            return self._deliver_answer()
-        return "כיצד אוכל לעוד לעזור לך? (לשיחה חדשה כתוב 'התחל מחדש')"
+
+        # הרשמה לאימון
+        if intent == "BOOK_CLASS" or self.state.pending_intent == "BOOK_CLASS":
+            date = nlu.get("claimed_date") or self.state.pending_date
+            time = nlu.get("claimed_time") or self.state.pending_time
+            return self._process_booking(date, time, self.state.candidate_member_name)
+
+        return (
+            "✅ אתה מאומת! כיצד אוכל עוד לעזור לך?\n"
+            "(לשיחה חדשה, כתוב 'התחל מחדש')"
+        )
 
     def _deliver_answer(self) -> str:
         """
-        שליפת תורים אמיתיים לאחר אימות מוצלח והשוואה לתביעת המשתמש.
-        זהו ה'לב' של התרחיש המרכזי.
+        מחזיר ללקוח את נתוני המנוי (אימון קרוב).
+
+        ⚠️ נקרא רק לאחר אימות מוצלח (stage=ANSWERED, verified=True).
         """
-        appts = _get_appointments(self.state.candidate_member_id)
-        appointments = appts.get("appointments", [])
+        # אם המשתמש רצה להירשם לאימון לפני שהזדהה, נבצע זאת כעת
+        if self.state.pending_intent == "BOOK_CLASS":
+            return self._process_booking(self.state.pending_date, self.state.pending_time, self.state.candidate_member_name)
+
+        appts_data = db_service.get_member_appointments(self.state.candidate_member_id)
+        appointments = appts_data.get("appointments", [])
         name = self.state.candidate_member_name
 
         if not appointments:
             return generate_response("no_appointments", {"name": name})
 
-        # נקח את התור הקרוב ביותר (ראשון ברשימה)
+        # לוקחים את התור הקרוב ביותר
         next_appt = appointments[0]
         real_date = next_appt["class_date"]
         real_time = next_appt["start_time"]
-        claimed_date = self.state.claimed_date
 
-        if claimed_date and claimed_date != real_date:
-            # ← התרחיש המרכזי: המשתמש טעה בתאריך!
-            return generate_response(
-                "appointment_correction",
-                {
-                    "name": name,
-                    "claimed_date": claimed_date,
-                    "real_date": real_date,
-                    "real_time": real_time,
-                },
-            )
-        else:
-            return generate_response(
-                "appointment_correct",
-                {
-                    "name": name,
-                    "claimed_date": claimed_date or real_date,
-                    "real_date": real_date,
-                    "real_time": real_time,
-                },
-            )
+        return generate_response(
+            "subscription_details",
+            {
+                "name": name,
+                "real_date": real_date,
+                "real_time": real_time,
+            },
+        )
 
     def _handle_rag(self, query: str) -> str:
         """
-        שאלות כלליות — מנסה RAG ואם לא נמצא, Fallback מנומס.
-        מיובא כאן ב-lazy import למניעת circular imports.
+        RAG_MODE: חיפוש תשובה לשאלה כללית.
         """
         try:
             from rag.retriever import get_relevant_answer
@@ -345,16 +345,48 @@ class ChatbotAgent:
                     {"question": query, "answer": answer},
                 )
         except Exception:
-            pass
+            pass  # כשל → fallback
 
-        # Graceful Fallback
-        return (
-            "לא מצאתי מידע ספציפי על שאלתך במאגר הידע שלי.\n"
-            "אנא פנה אלינו ישירות:\n"
-            "📞 טלפון: 050-0000000\n"
-            "🏠 כתובת: רחוב הספורט 1, תל אביב"
-        )
+        # Graceful Fallback: לא נמצא → הפנה לסטודיו
+        return MSG_FALLBACK
+
+    def _process_booking(self, date: str, time: str, name: str) -> str:
+        """
+        מטפל בלוגיקת ההרשמה לאימון עבור משתמש מאומת.
+        אם חסר תאריך או שעה - שואל את המשתמש.
+        אם יש את שניהם - מבצע הרשמה ומחזיר תוצאה.
+        """
+        if not date or not time:
+            # שומרים את מה שיש לנו עד כה
+            self.state.pending_intent = "BOOK_CLASS"
+            if date:
+                self.state.pending_date = date
+            if time:
+                self.state.pending_time = time
+                
+            missing = []
+            if not date: missing.append("תאריך")
+            if not time: missing.append("שעה")
+            return f"בשמחה! לאיזה {' ו'.join(missing)} תרצה לקבוע את האימון?"
+            
+        # יש לנו גם תאריך וגם שעה - נבצע הרשמה
+        result = register_member_to_wod(self.state.candidate_member_id, date, time)
+        
+        # מנקים את הבקשה הממתינה
+        self.state.pending_intent = None
+        self.state.pending_date = None
+        self.state.pending_time = None
+        
+        if result["success"]:
+            return generate_response("booking_success", {"name": name, "date": date, "time": time, "sys_message": result["message"]})
+        else:
+            return generate_response("booking_failure", {"name": name, "date": date, "time": time, "sys_message": result["message"]})
+
+    # ------------------------------------------------------------------
+    # Property נוחות
+    # ------------------------------------------------------------------
 
     @property
-    def history(self):
+    def history(self) -> list:
+        """מחזיר את היסטוריית השיחה לתצוגה."""
         return self.state.history

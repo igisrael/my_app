@@ -1,14 +1,13 @@
-# DEPLOY.md — נוהל פריסה ועדכון שרת — FitStudio v2
+# DEPLOY.md — נוהל פריסה ועדכון שרת (PythonAnywhere) — FitStudio v2
 
 > **גרסה**: 2.0 | **תאריך עדכון**: אוגוסט 2026
 
+פרויקט זה הותאם להרצה על השרתים החינמיים של **PythonAnywhere**.
+מכיוון שפלטפורמה זו אינה תומכת בהרצת `Streamlit` או `FastAPI` (היא דורשת WSGI Web App מסורתי), הומר ה-UI של הצ'אטבוט לאפליקציית **Flask**.
+
 ---
 
-## 1. הרצה מקומית (Local Development)
-
-### דרישות מקדימות
-- Python 3.11+
-- Git
+## 1. הרצה מקומית לצורך פיתוח (Local Development)
 
 ### שלבים
 
@@ -19,6 +18,7 @@ cd fitstudio
 
 # 2. התקן תלויות
 pip install -r requirements.txt
+pip install flask python-dotenv chromadb google-genai
 
 # 3. הגדר API Key
 # צור קובץ .env בתיקיית הפרויקט עם התוכן:
@@ -27,152 +27,107 @@ pip install -r requirements.txt
 # 4. אתחל נתוני דמו (פעם ראשונה בלבד)
 python seed_data.py
 
-# 5. הפעל את ה-API (בטרמינל נפרד)
-uvicorn api.main:app --reload --port 8000
-
-# 6. הפעל את ממשק Streamlit (בטרמינל נפרד)
-streamlit run app.py
+# 5. הפעל את שרת ה-Flask (Web UI של הצ'אטבוט)
+python flask_app.py
 ```
 
-האפליקציה תרוץ על:
-- **Streamlit UI**: http://localhost:8501
-- **FastAPI**: http://localhost:8000
-- **API Docs (Swagger)**: http://localhost:8000/docs
+האפליקציה תרוץ בכתובת: `http://localhost:5000`
 
 ---
 
-## 2. עדכון שרת מ-GitHub (Manual Deployment)
+## 2. פריסה ב-PythonAnywhere (Deployment)
 
-### תנאי מוקדם
-- גישת SSH לשרת
-- הפרויקט כבר פרוס פעם אחת בשרת
+כדי להעלות את הפרויקט ל-PythonAnywhere בחינם, עקוב אחר השלבים הבאים בדיוק:
 
-### שלב 1 — כניסה לשרת
+### שלב א' — העלאת הקוד לשרת
+1. פתח חשבון חינמי ב- [PythonAnywhere.com](https://www.pythonanywhere.com/).
+2. היכנס לטאב **Consoles** ופתח מסוף מסוג **Bash**.
+3. שכפל את קוד הפרויקט מ-GitHub:
+   ```bash
+   git clone https://github.com/<your-username>/fitstudio.git
+   cd fitstudio
+   ```
+
+### שלב ב' — יצירת סביבה וירטואלית והתקנת תלויות
+בתוך אותו מסוף Bash:
 ```bash
-ssh user@your-server-ip
-cd /opt/fitstudio
+# יצירת סביבה וירטואלית ל-Python 3.10
+mkvirtualenv --python=/usr/bin/python3.10 fitstudio-env
+
+# התקנת התלויות הדרושות
+pip install flask python-dotenv google-genai
 ```
 
-### שלב 2 — משיכת קוד עדכני מ-GitHub
+### שלב ג' — הגדרת משתני סביבה (.env)
+במסוף Bash:
 ```bash
-git fetch origin
-git pull origin main
+cd ~/fitstudio
+nano .env
 ```
-
-### שלב 3 — עדכון תלויות (אם נוספו)
-```bash
-pip install -r requirements.txt
+כתוב בפנים:
 ```
-
-### שלב 4 — הפעלה מחדש של השירותים
-
-```bash
-# עצור תהליכים קיימים
-pkill -f "uvicorn api.main" || true
-pkill -f "streamlit run app.py" || true
-
-# המתן שיתנקו
-sleep 3
-
-# הפעל מחדש ברקע
-nohup uvicorn api.main:app --host 0.0.0.0 --port 8000 > logs/api.log 2>&1 &
-nohup streamlit run app.py --server.port 8501 --server.address 0.0.0.0 > logs/streamlit.log 2>&1 &
-
-echo "✅ השירותים הופעלו מחדש בהצלחה"
+GEMINI_API_KEY=המפתח_שלך_כאן
+FLASK_SECRET_KEY=super-secret-key-123
 ```
+שמור וצא (`Ctrl+X` -> `Y` -> `Enter`).
 
-### שלב 5 — בדיקת תקינות
-```bash
-# בדיקת API
-curl http://localhost:8000/health
+### שלב ד' — הגדרת ה-Web App ב-PythonAnywhere
+1. עבור לטאב **Web** בלוח הבקרה של PythonAnywhere.
+2. לחץ על **Add a new web app**.
+3. לחץ *Next*, בחר **Manual configuration** (חשוב! אל תבחר Flask), ובחר את גרסת הפייתון (למשל Python 3.10).
+4. תחת סעיף **Virtualenv**, לחץ על הפס האדום והכנס את הנתיב:
+   `/home/yourusername/.virtualenvs/fitstudio-env`
+5. תחת סעיף **Code**, הגדר את ה-Source code ל:
+   `/home/yourusername/fitstudio`
 
-# בדיקת Streamlit
-curl -s -o /dev/null -w "%{http_code}" http://localhost:8501
+### שלב ה' — הגדרת ה-WSGI Configuration File
+1. תחת סעיף **Code**, לחץ על הקישור לקובץ ה-WSGI (למשל `/var/www/yourusername_pythonanywhere_com_wsgi.py`).
+2. מחק את כל מה שכתוב שם, והדבק את הקוד הבא:
+
+```python
+import sys
+import os
+from dotenv import load_dotenv
+
+# נתיב התיקייה של הפרויקט
+project_home = '/home/yourusername/fitstudio'
+if project_home not in sys.path:
+    sys.path = [project_home] + sys.path
+
+# טעינת משתני הסביבה (GEMINI_API_KEY)
+load_dotenv(os.path.join(project_home, '.env'))
+
+# ייבוא של ה-Flask app שהכנו
+from flask_app import app as application
 ```
+*(אל תשכח להחליף את `yourusername` בשם המשתמש שלך ב-PythonAnywhere!)*
+3. שמור את הקובץ.
+
+### שלב ו' — הפעלה!
+חזור לטאב **Web** ולחץ על הכפתור הירוק הגדול **Reload yourusername.pythonanywhere.com**.
+היכנס ללינק של האתר שלך והצ'אטבוט מוכן לעבודה!
 
 ---
 
-## 3. תהליך DevOps — סיכום
-
-```
-קוד מקומי ← git push → GitHub
-               ↓
-           git pull (ידני על השרת)
-               ↓
-         pip install -r requirements.txt
-               ↓
-         pkill + nohup (הפעלה מחדש)
-               ↓
-         curl /health (בדיקת תקינות)
-```
-
-> **חשוב**: זהו תהליך **pull-based deployment** ידני — לא CI/CD אוטומטי.
-> בכל עדכון יש לבצע את שלבים 1-5 לעיל.
-
----
-
-## 4. משתני סביבה (.env)
-
-| משתנה | תיאור | חובה |
-|-------|--------|------|
-| `GEMINI_API_KEY` | מפתח API של Google Gemini | ✅ |
-
-> **אבטחה**: לעולם אל תעלה `.env` ל-GitHub! הוא כבר ב-`.gitignore`.
-
----
-
-## 5. מבנה הפרויקט
+## 3. מבנה הפרויקט (גרסת Flask)
 
 ```
 fitstudio/
-├── app.py               # Streamlit UI (4 טאבים כולל צ'אטבוט)
-├── api/
-│   └── main.py          # FastAPI REST endpoints
+├── flask_app.py         # אפליקציית ה-Flask הראשית שרצה בשרת
+├── templates/
+│   └── chat.html        # ממשק משתמש לצ'אט מודרני עם CSS/JS
 ├── chatbot/
-│   ├── agent.py         # State Machine + לוגיקה ראשית
-│   ├── nlu.py           # Gemini NLU
-│   └── state.py         # ניהול מצב שיחה
+│   ├── agent.py         # לוגיקת הצ'אטבוט (State Machine)
+│   ├── db_service.py    # גישה ישירה ל-DB (במקום דרך API)
+│   ├── nlu.py           # חיבור ל-Gemini
+│   └── state.py         # ניהול מצב השיחה
 ├── rag/
-│   ├── knowledge_base.py # 25 שאלות-תשובות
-│   └── retriever.py      # ChromaDB similarity search
-├── services/
-│   ├── lead_service.py
-│   ├── member_service.py
-│   └── wod_service.py
-├── database.py          # SQLite + migrations
-├── seed_data.py         # זריעת נתוני דמו
+│   ├── knowledge_base.py
+│   └── retriever.py
+├── services/            # שירותי מערכת מתועדים
+├── database.py          # סכמת ה-DB ו-migrations
+├── seed_data.py         # יצירת נתונים התחלתיים
 ├── requirements.txt
-├── .env                 # (לא ב-Git!)
-└── DEPLOY.md
+├── .env                 # חובה ליצור מקומית/בשרת (לא ב-Git)
+└── DEPLOY.md            # מסמך זה
 ```
-
----
-
-## 6. לוגים ואיתור שגיאות
-
-```bash
-# לוג API
-tail -f logs/api.log
-
-# לוג Streamlit
-tail -f logs/streamlit.log
-
-# בדיקת תהליכים רצים
-ps aux | grep -E "uvicorn|streamlit"
-```
-
----
-
-## 7. גיבוי בסיס הנתונים
-
-```bash
-# גיבוי ידני
-cp studio.db backups/studio_$(date +%Y%m%d_%H%M).db
-
-# שחזור
-cp backups/studio_YYYYMMDD_HHMM.db studio.db
-```
-
----
-
-*נכתב לפי דרישות פרויקט הסיום — FitStudio v2*
