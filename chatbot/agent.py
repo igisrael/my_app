@@ -29,6 +29,7 @@ from chatbot.state import ConversationState, MAX_AUTH_ATTEMPTS
 from chatbot.nlu import extract_intent, generate_response
 from chatbot import db_service
 from services.wod_service import register_member_to_wod
+from logger_setup import logger
 
 
 # ===========================================================
@@ -111,8 +112,6 @@ class ChatbotAgent:
 
     def process_message(self, user_message: str) -> str:
         """
-        מעבד הודעת משתמש ומחזיר תשובת בוט.
-
         זהו ה-entry point היחיד שצריך לקרוא מבחוץ.
         כל לוגיקת הניתוב מתרחשת כאן.
 
@@ -130,38 +129,61 @@ class ChatbotAgent:
             תשובת הבוט כטקסט (עברית)
         """
         user_message = user_message.strip()
+        logger.info("--- תחילת עיבוד הודעה חדשה ---")
+        logger.info(f"הודעת משתמש: '{user_message}'")
+        logger.info(f"סטטוס שיחה נוכחי: {self.state.stage}")
 
-        # שמור את הודעת המשתמש בהיסטוריה
-        self.state.add_message("user", user_message)
+        try:
+            # שמור את הודעת המשתמש בהיסטוריה
+            self.state.add_message("user", user_message)
 
-        # ---- בדיקה: שיחה חסומה לאחר 3 כישלונות ----
-        if self.state.is_blocked:
-            self.state.add_message("bot", MSG_BLOCKED)
-            return MSG_BLOCKED
+            # ---- בדיקה: שיחה חסומה לאחר 3 כישלונות ----
+            if self.state.is_blocked:
+                logger.warning("השיחה חסומה עקב ריבוי כשלונות אימות. לא מבצע פעולה.")
+                self.state.add_message("bot", MSG_BLOCKED)
+                return MSG_BLOCKED
 
-        # ---- NLU: חילוץ intent ומידע מובנה ----
-        nlu = extract_intent(user_message)
-        intent = nlu.get("intent", "OTHER")
+            # ---- NLU: חילוץ intent ומידע מובנה ----
+            nlu = extract_intent(user_message)
+            
+            if nlu.get("error"):
+                error_msg = "⚠️ אירעה שגיאת תקשורת עם מנוע ה-AI (ייתכן שמפתח ה-API שגוי או פג תוקף). אנא עדכן את קובץ ה-.env שלך."
+                logger.error(f"API Key error or NLU failure detected. Details: {nlu.get('error')}")
+                self.state.add_message("bot", error_msg)
+                return error_msg
 
-        # ---- שמירת כוונת הרשמה אם עדיין לא מאומת ----
-        if intent == "BOOK_CLASS" and not self.state.is_verified:
-            self.state.pending_intent = "BOOK_CLASS"
-            if nlu.get("claimed_date"):
-                self.state.pending_date = nlu.get("claimed_date")
-            if nlu.get("claimed_time"):
-                self.state.pending_time = nlu.get("claimed_time")
+            intent = nlu.get("intent", "OTHER")
 
-        # ---- איפוס מפורש של השיחה ----
-        reset_keywords = {"התחל מחדש", "חדש", "reset", "restart", "נתחיל מחדש"}
-        if intent == "RESET" or user_message.strip().lower() in reset_keywords:
-            self.state.reset()
-            self.state.add_message("bot", MSG_RESET)
-            return MSG_RESET
+            # ---- שמירת כוונת הרשמה אם עדיין לא מאומת ----
+            if intent == "BOOK_CLASS" and not self.state.is_verified:
+                logger.info("זוהתה כוונת הרשמה לאימון. שומר בהמתנה עד לאימות.")
+                self.state.pending_intent = "BOOK_CLASS"
+                if nlu.get("claimed_date"):
+                    self.state.pending_date = nlu.get("claimed_date")
+                if nlu.get("claimed_time"):
+                    self.state.pending_time = nlu.get("claimed_time")
 
-        # ---- ניתוב לפי שלב השיחה ----
-        response = self._route(intent, nlu, user_message)
-        self.state.add_message("bot", response)
-        return response
+            # ---- איפוס מפורש של השיחה ----
+            reset_keywords = {"התחל מחדש", "חדש", "reset", "restart", "נתחיל מחדש"}
+            if intent == "RESET" or user_message.strip().lower() in reset_keywords:
+                logger.info("המשתמש ביקש איפוס שיחה. המצב אופס.")
+                self.state.reset()
+                self.state.add_message("bot", MSG_RESET)
+                return MSG_RESET
+
+            # ---- ניתוב לפי שלב השיחה ----
+            logger.info(f"מנתב לשלב {self.state.stage} עם כוונה: {intent}")
+            response = self._route(intent, nlu, user_message)
+            
+            self.state.add_message("bot", response)
+            logger.info("--- סיום עיבוד בהצלחה ---")
+            return response
+
+        except Exception as e:
+            logger.error(f"שגיאה חמורה בעיבוד ההודעה: {str(e)}", exc_info=True)
+            error_reply = "מצטערים, אירעה שגיאה פנימית במערכת. אנא נסה שוב או פנה לתמיכה."
+            self.state.add_message("bot", error_reply)
+            return error_reply
 
     # ------------------------------------------------------------------
     # ניתוב (Router)
@@ -274,7 +296,10 @@ class ChatbotAgent:
         # הלקוח לא נמצא או השם/ת.ז שגויים, מציעים הרשמה ומאפסים
         # שומרים את השם וה-ID לפני האיפוס כדי להעביר ל-Prompt
         offer_msg = generate_response("offer_registration", {"name": name, "id_number": id_number})
-        self.state.reset()
+        
+        # לא מאפסים את כל המצב כדי לשמור על מונה הניסיונות (auth_attempts)
+        # נשארים בשלב IDENTIFY_ID כדי שהמשתמש יוכל לנסות שוב ת.ז.
+        
         return offer_msg
 
     def _handle_answered(self, intent: str, nlu: dict, raw: str) -> str:
@@ -295,6 +320,10 @@ class ChatbotAgent:
             date = nlu.get("claimed_date") or self.state.pending_date
             time = nlu.get("claimed_time") or self.state.pending_time
             return self._process_booking(date, time, self.state.candidate_member_name)
+
+        # בירור על תור קיים
+        if intent == "APPOINTMENT_INQUIRY":
+            return self._deliver_answer()
 
         return (
             "✅ אתה מאומת! כיצד אוכל עוד לעזור לך?\n"

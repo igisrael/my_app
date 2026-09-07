@@ -1,133 +1,120 @@
-# DEPLOY.md — נוהל פריסה ועדכון שרת (PythonAnywhere) — FitStudio v2
+# מדריך פריסה - FitStudio 🚀
 
-> **גרסה**: 2.0 | **תאריך עדכון**: אוגוסט 2026
+קובץ זה מכיל את ההוראות לפריסת המערכת בשרת אמיתי (Production) ישירות מתוך המאגר ב-GitHub. 
+ההוראות מתאימות לפריסה על שרתי לינוקס (כגון Ubuntu ב-AWS, DigitalOcean או פלטפורמות ענן אחרות), וכוללות התקנה דרך Git, הגדרת סביבה, וריצה כסרביס.
 
-פרויקט זה הותאם להרצה על השרתים החינמיים של **PythonAnywhere**.
-מכיוון שפלטפורמה זו אינה תומכת בהרצת `Streamlit` או `FastAPI` (היא דורשת WSGI Web App מסורתי), הומר ה-UI של הצ'אטבוט לאפליקציית **Flask**.
+## דרישות קדם (Prerequisites)
+1. גישת SSH לשרת היעד.
+2. מותקנים על השרת:
+   - Python 3.10 ומעלה
+   - Git
+   - pip, venv
+   - (אופציונלי) Docker & Docker Compose - במידה ותרצו לפרוס באמצעות Docker.
 
----
+## פריסה (Deployment) - סביבת לינוקס מסורתית
 
-## 1. הרצה מקומית לצורך פיתוח (Local Development)
-
-### שלבים
+### 1. משיכת הקוד מ-GitHub
+התחברו לשרת באמצעות SSH והריצו את הפקודות הבאות:
 
 ```bash
-# 1. שכפל את הריפו
-git clone https://github.com/<your-username>/fitstudio.git
+# היכנסו לתיקייה בה תרצו לפרוס את הפרויקט (לדוגמה /var/www)
+cd /var/www
+
+# שכפלו את המאגר (יש להחליף ל-URL שלכם)
+git clone https://github.com/your-username/fitstudio.git
 cd fitstudio
 
-# 2. התקן תלויות
+# אם רוצים לפרוס מענף Dev (כמו בפרויקט שלנו)
+git checkout Dev
+```
+
+### 2. הקמת סביבה וירטואלית (Virtual Environment)
+לא מומלץ להתקין חבילות באופן גלובלי.
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### 3. התקנת תלויות
+```bash
+pip install --upgrade pip
 pip install -r requirements.txt
-pip install flask python-dotenv chromadb google-genai
-
-# 3. הגדר API Key
-# צור קובץ .env בתיקיית הפרויקט עם התוכן:
-# GEMINI_API_KEY=your_key_here
-
-# 4. אתחל נתוני דמו (פעם ראשונה בלבד)
-python seed_data.py
-
-# 5. הפעל את שרת ה-Flask (Web UI של הצ'אטבוט)
-python flask_app.py
 ```
 
-האפליקציה תרוץ בכתובת: `http://localhost:5000`
-
----
-
-## 2. פריסה ב-PythonAnywhere (Deployment)
-
-כדי להעלות את הפרויקט ל-PythonAnywhere בחינם, עקוב אחר השלבים הבאים בדיוק:
-
-### שלב א' — העלאת הקוד לשרת
-1. פתח חשבון חינמי ב- [PythonAnywhere.com](https://www.pythonanywhere.com/).
-2. היכנס לטאב **Consoles** ופתח מסוף מסוג **Bash**.
-3. שכפל את קוד הפרויקט מ-GitHub:
-   ```bash
-   git clone https://github.com/<your-username>/fitstudio.git
-   cd fitstudio
-   ```
-
-### שלב ב' — יצירת סביבה וירטואלית והתקנת תלויות
-בתוך אותו מסוף Bash:
+### 4. הגדרת משתני סביבה (.env)
+צרו קובץ `.env` והכניסו את מפתח ה-API שלכם:
 ```bash
-# יצירת סביבה וירטואלית ל-Python 3.10
-mkvirtualenv --python=/usr/bin/python3.10 fitstudio-env
-
-# התקנת התלויות הדרושות
-pip install flask python-dotenv google-genai
-```
-
-### שלב ג' — הגדרת משתני סביבה (.env)
-במסוף Bash:
-```bash
-cd ~/fitstudio
 nano .env
 ```
-כתוב בפנים:
+בתוך הקובץ, כתבו:
+```env
+GEMINI_API_KEY=YOUR_PRODUCTION_API_KEY_HERE
 ```
-GEMINI_API_KEY=המפתח_שלך_כאן
-FLASK_SECRET_KEY=super-secret-key-123
+שמרו וצאו (Ctrl+X -> Y -> Enter).
+
+### 5. הקמת מסד הנתונים
+הריצו את סקריפט הזרקת הנתונים על מנת לאתחל את בסיס הנתונים:
+```bash
+python seed_data.py
 ```
-שמור וצא (`Ctrl+X` -> `Y` -> `Enter`).
 
-### שלב ד' — הגדרת ה-Web App ב-PythonAnywhere
-1. עבור לטאב **Web** בלוח הבקרה של PythonAnywhere.
-2. לחץ על **Add a new web app**.
-3. לחץ *Next*, בחר **Manual configuration** (חשוב! אל תבחר Flask), ובחר את גרסת הפייתון (למשל Python 3.10).
-4. תחת סעיף **Virtualenv**, לחץ על הפס האדום והכנס את הנתיב:
-   `/home/yourusername/.virtualenvs/fitstudio-env`
-5. תחת סעיף **Code**, הגדר את ה-Source code ל:
-   `/home/yourusername/fitstudio`
+### 6. הפעלת המערכת כ-Service (Systemd)
+כדי ש-Streamlit ירוץ תמיד ברקע ויחזור במקרה שהשרת קורס או מאותחל, ניצור Systemd service.
 
-### שלב ה' — הגדרת ה-WSGI Configuration File
-1. תחת סעיף **Code**, לחץ על הקישור לקובץ ה-WSGI (למשל `/var/www/yourusername_pythonanywhere_com_wsgi.py`).
-2. מחק את כל מה שכתוב שם, והדבק את הקוד הבא:
-
-```python
-import sys
-import os
-from dotenv import load_dotenv
-
-# נתיב התיקייה של הפרויקט
-project_home = '/home/yourusername/fitstudio'
-if project_home not in sys.path:
-    sys.path = [project_home] + sys.path
-
-# טעינת משתני הסביבה (GEMINI_API_KEY)
-load_dotenv(os.path.join(project_home, '.env'))
-
-# ייבוא של ה-Flask app שהכנו
-from flask_app import app as application
+```bash
+sudo nano /etc/systemd/system/fitstudio.service
 ```
-*(אל תשכח להחליף את `yourusername` בשם המשתמש שלך ב-PythonAnywhere!)*
-3. שמור את הקובץ.
 
-### שלב ו' — הפעלה!
-חזור לטאב **Web** ולחץ על הכפתור הירוק הגדול **Reload yourusername.pythonanywhere.com**.
-היכנס ללינק של האתר שלך והצ'אטבוט מוכן לעבודה!
+הכניסו את התוכן הבא (התאימו נתיבים לשלכם):
+```ini
+[Unit]
+Description=FitStudio Streamlit App
+After=network.target
 
----
+[Service]
+User=ubuntu
+WorkingDirectory=/var/www/fitstudio
+ExecStart=/var/www/fitstudio/venv/bin/streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+Restart=always
 
-## 3. מבנה הפרויקט (גרסת Flask)
-
+[Install]
+WantedBy=multi-user.target
 ```
-fitstudio/
-├── flask_app.py         # אפליקציית ה-Flask הראשית שרצה בשרת
-├── templates/
-│   └── chat.html        # ממשק משתמש לצ'אט מודרני עם CSS/JS
-├── chatbot/
-│   ├── agent.py         # לוגיקת הצ'אטבוט (State Machine)
-│   ├── db_service.py    # גישה ישירה ל-DB (במקום דרך API)
-│   ├── nlu.py           # חיבור ל-Gemini
-│   └── state.py         # ניהול מצב השיחה
-├── rag/
-│   ├── knowledge_base.py
-│   └── retriever.py
-├── services/            # שירותי מערכת מתועדים
-├── database.py          # סכמת ה-DB ו-migrations
-├── seed_data.py         # יצירת נתונים התחלתיים
-├── requirements.txt
-├── .env                 # חובה ליצור מקומית/בשרת (לא ב-Git)
-└── DEPLOY.md            # מסמך זה
+
+הפעילו את הסרביס:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable fitstudio
+sudo systemctl start fitstudio
 ```
+
+כעת האפליקציה תרוץ באופן קבוע על פורט 8501. 
+
+## פריסה חלופית באמצעות Docker
+
+אם השרת תומך ב-Docker, ניתן לעשות זאת בצורה קלה יותר:
+
+1. ודאו שהקוד נמצא בשרת (`git clone`).
+2. בנו את ה-Image:
+   ```bash
+   docker build -t fitstudio-app .
+   ```
+3. הריצו את הקונטיינר (וודאו שקובץ ה-`.env` קיים):
+   ```bash
+   docker run -d -p 8501:8501 --env-file .env --name fitstudio-bot fitstudio-app
+   ```
+
+## עדכון גרסה עתידי (Update / CI/CD)
+כדי לעדכן את השרת לאחר שדחפתם שינויים חדשים ל-GitHub, הריצו:
+```bash
+cd /var/www/fitstudio
+git pull origin Dev
+source venv/bin/activate
+pip install -r requirements.txt
+sudo systemctl restart fitstudio
+```
+ניתן לבצע אוטומציה של תהליך זה באמצעות GitHub Actions (CD).
+
+## אבטחה
+- שימו לב לא לפתוח את פורט 8501 החוצה ללא הגנה, מומלץ להשתמש ב-Nginx בתור Reverse Proxy ולהוסיף תעודת SSL דרך Let's Encrypt.
+- ודאו שהגישה לקובץ `.env` ול-`database.db` מוגבלת למשתמש השרת בלבד (`chmod 600`).
