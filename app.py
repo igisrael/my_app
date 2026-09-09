@@ -9,6 +9,7 @@ from database import get_connection, init_db
 from services.lead_service import add_lead, convert_lead_to_member
 from services.member_service import add_member, get_all_members
 from services.wod_service import get_or_create_wod_class, register_member_to_wod
+from chatbot.agent import ChatbotAgent
 
 # 1. הגדרת תצורת העמוד ב-Streamlit
 st.set_page_config(
@@ -20,73 +21,126 @@ st.set_page_config(
 # סגנון UI מותאם אישית (CSS)
 st.markdown("""
 <style>
-    /* רקע כללי לאפליקציה (בהיר) */
+    /* Premium Gym Palette: Dark Charcoal, Vibrant Red (#e63946), Slate (#457b9d), Ice White (#f1faee) */
+    
+    /* רקע כללי לאפליקציה עם תמונת חדר הכושר (כהה) וזכוכית אקרילית (Glassmorphism) */
     .stApp {
-        background: linear-gradient(135deg, #f5f7fa, #c3cfe2);
-        color: #2c3e50;
+        background-image: linear-gradient(rgba(15, 23, 42, 0.8), rgba(15, 23, 42, 0.85)), url('https://images.unsplash.com/photo-1534438327276-14e5300c3a48?q=80&w=1470&auto=format&fit=crop');
+        background-size: cover;
+        background-position: center;
+        background-attachment: fixed;
+        color: #f1faee;
     }
     
-    /* עיצוב כפתורים */
-    div[data-testid="stButton"] button, div[data-testid="stFormSubmitButton"] button {
-        background: linear-gradient(90deg, #ff4b4b, #ff7676);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 0.5rem 1rem;
-        font-weight: 600;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 10px rgba(255, 75, 75, 0.2);
+    /* כפתורים כלליים - עיצוב מודרני מבריק */
+    div[data-testid="stButton"] button, 
+    div[data-testid="stFormSubmitButton"] button,
+    div[data-testid="stDownloadButton"] button {
+        background: linear-gradient(135deg, #e63946, #c1121f) !important;
+        color: white !important;
+        border-radius: 8px !important;
+        padding: 0.5rem 1rem !important;
+        border: none !important;
+        box-shadow: 0 4px 15px rgba(230, 57, 70, 0.4) !important;
+        transition: all 0.3s ease !important;
+        font-weight: 600 !important;
     }
     
-    div[data-testid="stButton"] button:hover, div[data-testid="stFormSubmitButton"] button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 15px rgba(255, 75, 75, 0.4);
+    div[data-testid="stButton"] button:hover, 
+    div[data-testid="stFormSubmitButton"] button:hover,
+    div[data-testid="stDownloadButton"] button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 6px 20px rgba(230, 57, 70, 0.6) !important;
+        background: linear-gradient(135deg, #c1121f, #780000) !important;
     }
     
-    /* עיצוב ה-KPIs (st.metric) */
+    /* פתרון לכיתוב בתוך כפתורים כך שתמיד יהיה לבן וברור */
+    div[data-testid="stButton"] button *, 
+    div[data-testid="stFormSubmitButton"] button *,
+    div[data-testid="stDownloadButton"] button * {
+        color: white !important;
+    }
+    
+    /* מטריקות - תצוגת נתונים (Glassmorphism) */
     div[data-testid="stMetric"] {
-        background: rgba(255, 255, 255, 0.8);
-        border: 1px solid rgba(0, 0, 0, 0.05);
+        background: rgba(30, 41, 59, 0.7);
+        border: 1px solid rgba(255, 255, 255, 0.1);
         border-radius: 12px;
-        padding: 1.5rem;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+        padding: 1rem;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
         backdrop-filter: blur(10px);
-        transition: transform 0.3s ease;
+        -webkit-backdrop-filter: blur(10px);
+    }
+    div[data-testid="stMetric"] label {
+        color: #a8dadc !important;
+        font-weight: 500;
+    }
+    div[data-testid="stMetric"] div {
+        color: #f1faee !important;
     }
     
-    div[data-testid="stMetric"]:hover {
-        transform: translateY(-5px);
-        border-color: rgba(255, 75, 75, 0.4);
-        box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
-    }
-    
-    /* עיצוב טפסים */
+    /* עיצוב טפסים (Glassmorphism) */
     div[data-testid="stForm"] {
-        background: rgba(255, 255, 255, 0.6);
-        border: 1px solid rgba(0, 0, 0, 0.05);
-        border-radius: 12px;
-        padding: 1.5rem;
+        background: rgba(30, 41, 59, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 16px;
+        padding: 2rem;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
     }
     
-    /* כותרות וטקסטים */
+    div[data-testid="stForm"] label, div[data-testid="stForm"] div, div[data-testid="stForm"] p {
+        color: #f1faee !important;
+    }
+    
+    /* כותרות ראשיות באפליקציה */
     h1, h2, h3 {
-        color: #1a202c !important;
+        color: #f1faee !important;
+        text-shadow: 2px 2px 4px rgba(0,0,0,0.6);
+        font-weight: 700;
     }
     
-    /* טאבים */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
+    /* ====================================================
+       כותרות הטאבים
+       ==================================================== */
+    
+    /* הטאבים עצמם */
+    div.stTabs button {
+        background: rgba(15, 23, 42, 0.5) !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        border-bottom: none !important;
+        border-radius: 10px 10px 0 0 !important;
+        margin-right: 4px !important;
+        padding: 0.5rem 1rem !important;
+        transition: all 0.3s ease;
     }
-    .stTabs [data-baseweb="tab"] {
-        background: rgba(0, 0, 0, 0.03);
-        border-radius: 8px 8px 0 0;
-        padding: 10px 20px;
+    
+    div.stTabs button p {
+        font-weight: 600 !important;
+        font-size: 1.1rem !important;
+        color: #f1faee !important; /* תוספת למניעת טקסט אפור על רקע אפור */
     }
-    .stTabs [aria-selected="true"] {
-        background: rgba(255, 75, 75, 0.1) !important;
-        border-bottom: 2px solid #ff4b4b !important;
-        color: #ff4b4b !important;
+
+    div.stTabs button:hover {
+        background: rgba(30, 41, 59, 0.8) !important;
+        color: #ffffff !important;
     }
+    
+    /* הטאב הפעיל */
+    div.stTabs button[aria-selected="true"] {
+        background: rgba(230, 57, 70, 0.2) !important;
+        border-bottom: 3px solid #e63946 !important;
+    }
+    
+    /* הטקסט בטאב הפעיל */
+    div.stTabs button[aria-selected="true"] p,
+    div.stTabs button[aria-selected="true"] span,
+    div.stTabs button[aria-selected="true"] div {
+        color: #e63946 !important;
+        text-shadow: 0 0 10px rgba(230, 57, 70, 0.5) !important;
+    }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -96,8 +150,8 @@ init_db()
 st.title("🏋️‍♂️ FitStudio - מערכת ניהול אימונים, מנויים ולידים")
 
 # 2. חלוקת הממשק לטאבים לפי תהליכים
-tab1, tab2, tab3 = st.tabs(
-    ["📅 יומן אימונים ושריון תור", "👤 קליטת לקוח חדש / מנויים", "🎯 ניהול לידים"]
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["📅 יומן אימונים ושריון תור", "👤 קליטת לקוח חדש / מנויים", "🎯 ניהול לידים", "💬 צ'אטבוט חכם"]
 )
 
 
@@ -272,3 +326,153 @@ with tab3:
                         st.error(res["message"])
         else:
             st.info("אין לידים הממתינים להמרה.")
+
+
+# =========================================================
+# טאב 4: צ'אטבוט חכם
+# =========================================================
+with tab4:
+    st.header("💬 צ'אטבוט FitStudio — שאל אותי הכל!")
+    st.caption("זהה תור, בדוק פרטים, שאל שאלות כלליות — הכל בשפה טבעית.")
+
+    # --- CSS לבועות צ'אט ---
+    st.markdown("""
+    <style>
+    .chat-container { display: flex; flex-direction: column; gap: 12px; }
+    .chat-bubble {
+        max-width: 75%;
+        padding: 12px 16px;
+        border-radius: 18px;
+        font-size: 15px;
+        line-height: 1.5;
+        word-wrap: break-word;
+    }
+    .user-bubble {
+        background: linear-gradient(135deg, #ff4b4b, #ff7676);
+        color: white;
+        align-self: flex-end;
+        margin-left: auto;
+        border-bottom-right-radius: 4px;
+    }
+    .bot-bubble {
+        background: rgba(255,255,255,0.85);
+        color: #2c3e50;
+        align-self: flex-start;
+        border-bottom-left-radius: 4px;
+        border: 1px solid rgba(0,0,0,0.08);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    .chat-wrapper { display: flex; flex-direction: column; }
+    .user-wrap { align-items: flex-end; }
+    .bot-wrap  { align-items: flex-start; }
+    .chat-label { font-size: 11px; color: #888; margin-bottom: 3px; }
+    .status-badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 13px;
+        font-weight: 600;
+    }
+    .status-green { background: #d4edda; color: #155724; }
+    .status-yellow { background: #fff3cd; color: #856404; }
+    .status-red { background: #f8d7da; color: #721c24; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # --- אתחול Session State ---
+    if "chatbot_agent" not in st.session_state:
+        st.session_state.chatbot_agent = ChatbotAgent()
+        # הודעת פתיחה
+        welcome = (
+            "שלום! אני הבוט של FitStudio 🏋️\n"
+            "אני יכול לעזור לך לבדוק פרטי תור, שעות הסטודיו ועוד.\n"
+            "ספר לי — מה שמך ומה תרצה לדעת?"
+        )
+        st.session_state.chatbot_agent.state.add_message("bot", welcome)
+        st.session_state.chatbot_agent.state.stage = "IDENTIFY_NAME"
+
+    agent: ChatbotAgent = st.session_state.chatbot_agent
+
+    # --- פס מצב עליון ---
+    col_status, col_reset = st.columns([3, 1])
+    with col_status:
+        stage = agent.state.stage
+        if stage == "ANSWERED":
+            st.markdown('<span class="status-badge status-green">🔓 מאומת — פרטים זמינים</span>', unsafe_allow_html=True)
+        elif stage == "BLOCKED":
+            st.markdown('<span class="status-badge status-red">🔒 שיחה חסומה</span>', unsafe_allow_html=True)
+        elif stage == "IDENTIFY_ID":
+            st.markdown('<span class="status-badge status-yellow">🔐 ממתין לאימות זהות</span>', unsafe_allow_html=True)
+        else:
+            st.markdown('<span class="status-badge status-yellow">💬 שיחה פעילה</span>', unsafe_allow_html=True)
+
+    with col_reset:
+        if st.button("🔄 התחל מחדש", key="chat_reset"):
+            st.session_state.chatbot_agent = ChatbotAgent()
+            welcome = (
+                "שיחה חדשה! אני הבוט של FitStudio 🏋️\n"
+                "במה אוכל לעזור לך?"
+            )
+            st.session_state.chatbot_agent.state.add_message("bot", welcome)
+            st.session_state.chatbot_agent.state.stage = "IDENTIFY_NAME"
+            st.rerun()
+
+    st.markdown("---")
+
+    # --- הצגת היסטוריית שיחה ---
+    history = agent.history
+    if history:
+        chat_html = '<div class="chat-container">'
+        for msg in history:
+            role = msg["role"]
+            content = msg["content"].replace("\n", "<br>")
+            if role == "user":
+                chat_html += f'''
+                <div class="chat-wrapper user-wrap">
+                    <div class="chat-label">אתה</div>
+                    <div class="chat-bubble user-bubble">{content}</div>
+                </div>'''
+            else:
+                chat_html += f'''
+                <div class="chat-wrapper bot-wrap">
+                    <div class="chat-label">🤖 FitBot</div>
+                    <div class="chat-bubble bot-bubble">{content}</div>
+                </div>'''
+        chat_html += '</div>'
+        st.markdown(chat_html, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # --- קלט משתמש ---
+    if not agent.state.is_blocked:
+        with st.form("chat_form", clear_on_submit=True):
+            col_input, col_send = st.columns([5, 1])
+            with col_input:
+                user_input = st.text_input(
+                    "הודעה",
+                    placeholder="כתוב הודעה... (לדוגמה: 'קוראים לי רותם ויש לי תור ב-19.08.2026')",
+                    label_visibility="collapsed",
+                    key="chat_input",
+                )
+            with col_send:
+                send = st.form_submit_button("שלח ➤")
+
+            if send and user_input.strip():
+                with st.spinner("FitBot מקליד..."):
+                    agent.process_message(user_input.strip())
+                st.rerun()
+    else:
+        st.error("השיחה חסומה לאחר מספר ניסיונות כושלים. לחץ 'התחל מחדש' לשיחה חדשה.")
+
+    # --- טיפים בסרגל צד ---
+    with st.expander("💡 דוגמאות לשאלות"):
+        st.markdown("""
+        **בדיקת תור:**
+        - *"קוראים לי רותם ויש לי תור ב-19.08.2026"*
+        - *"שמי ניר לוי, רוצה לבדוק את התור שלי"*
+
+        **שאלות כלליות:**
+        - *"מה שעות הפעילות?"*
+        - *"כמה עולה מנוי חודשי?"*
+        - *"מה קורה אם לא הגעתי לאימון?"*
+        """)
